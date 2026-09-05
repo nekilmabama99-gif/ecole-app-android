@@ -610,6 +610,8 @@ const DEFAULT_PARAMS = {
   trimestresDates: {}, // { [nomTrimestre]: { debut:'YYYY-MM-DD', fin:'YYYY-MM-DD' } } — utilisé pour rattacher absences/retards à un trimestre
   ponderationDevoirs: 50,
   ponderationComposition: 50,
+  tauxReductionAbsenceJour: 0.5,
+  tauxReductionRetardHeure: 0.25,
   categoriesDepenses: ['Fournitures','Entretien','Salaires','Électricité / Eau','Transport','Autre'],
   joursSemaine: ['Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'],
   creneauxHoraires: ['07h30 - 08h30','08h30 - 09h30','09h30 - 10h30','10h30 - 10h45 (pause)','10h45 - 11h45','11h45 - 12h45','12h45 - 15h00 (pause déjeuner)','15h00 - 16h00','16h00 - 17h00'],
@@ -1008,6 +1010,8 @@ async function loadAll(){
   if(!PARAMS.categoriesMatieres) PARAMS.categoriesMatieres = ['Littéraire','Scientifique','Sport'];
   if(PARAMS.ponderationDevoirs===undefined) PARAMS.ponderationDevoirs = 50;
   if(PARAMS.ponderationComposition===undefined) PARAMS.ponderationComposition = 50;
+  if(PARAMS.tauxReductionAbsenceJour===undefined) PARAMS.tauxReductionAbsenceJour = 0.5;
+  if(PARAMS.tauxReductionRetardHeure===undefined) PARAMS.tauxReductionRetardHeure = 0.25;
   if(PARAMS.seuilRetardHeuresSemaine===undefined) PARAMS.seuilRetardHeuresSemaine = 10;
   if(PARAMS.seuilAbsenceJoursSemaine===undefined) PARAMS.seuilAbsenceJoursSemaine = 2;
   if(!PARAMS.trimestresDates) PARAMS.trimestresDates = {};
@@ -1553,14 +1557,27 @@ function moyenneMatiere(n){
   return { d1, d2, moyDevoirs, comp, moyenne };
 }
 
+// Réduction de points pour absence/retard : calculée automatiquement à partir des VRAIES
+// absences/retards NON JUSTIFIÉES déjà enregistrées dans le module Absences pour ce trimestre
+// (× taux configurable dans Paramètres) — aucune ressaisie manuelle. Une absence justifiée
+// (certificat médical, etc.) n'entraîne aucune réduction. Nécessite que les dates de début/fin
+// du trimestre soient configurées dans Paramètres (sinon les absences ne peuvent pas être
+// rattachées à un trimestre).
+function calculerReductionAbsence(eleveId, trimestre){
+  const assiduite = assiduiteDisciplinaireTrimestre(eleveId, trimestre);
+  return assiduite.joursAbsence*(Number(PARAMS.tauxReductionAbsenceJour)||0) + assiduite.heuresRetard*(Number(PARAMS.tauxReductionRetardHeure)||0);
+}
+
 // Calcule le détail complet d'un trimestre pour un élève : matières, sous-moyennes par catégorie, moyenne générale
 function computeTrimestre(eleveId, trimestre){
   const eleve = ELEVES.find(e=>e.id===eleveId);
   const classe = eleve ? eleve.classe : null;
   const notes = NOTES.filter(n=>n.eleveId===eleveId && n.trimestre===trimestre);
-  // Un élève dispensé de sport ne doit avoir ni la matière Sport sur son bulletin,
-  // ni son éventuelle note prise en compte dans le calcul de sa moyenne.
-  const dispenseSport = eleve && eleve.statutSport==='Dispensé';
+  // Réductions de points (conduite / absence-retard) et dispense de sport : rattachées à CE
+  // trimestre précis (comme la discipline), pas à un statut général sur la fiche élève — sinon
+  // changer le statut sport en cours d'année modifierait rétroactivement des bulletins déjà émis.
+  const reduc = (DISCIPLINE[eleveId]||{})[trimestre] || {};
+  const dispenseSport = reduc.sportDispense===true;
   const lignes = notes.map(n=>{
     const info = getMatiereInfo(n, classe);
     const calc = moyenneMatiere(n);
@@ -1586,13 +1603,14 @@ function computeTrimestre(eleveId, trimestre){
 
   // Réductions de points pour conduite et absence, déduites du total des points
   // AVANT de calculer la moyenne trimestrielle générale (pas des sous-moyennes).
-  const reduc = (DISCIPLINE[eleveId]||{})[trimestre] || {};
   const reductionConduite = Number(reduc.conduite)||0;
-  const reductionAbsence = Number(reduc.absence)||0;
-  const totalPointsAjuste = totalPoints - reductionConduite - reductionAbsence;
+  const reductionAbsence = calculerReductionAbsence(eleveId, trimestre);
+  // Le total après réductions ne descend jamais sous 0 : au-delà, la moyenne deviendrait
+  // négative, ce qui n'a pas de sens sur un bulletin — la réduction est simplement plafonnée.
+  const totalPointsAjuste = Math.max(0, totalPoints - reductionConduite - reductionAbsence);
 
   const moyenneGenerale = totalCoeff>0 ? totalPointsAjuste/totalCoeff : null;
-  return { lignes, sousMoyennes, moyenneGenerale, totalCoeff, totalPoints, reductionConduite, reductionAbsence, totalPointsAjuste };
+  return { lignes, sousMoyennes, moyenneGenerale, totalCoeff, totalPoints, reductionConduite, reductionAbsence, totalPointsAjuste, dispenseSport, motifSportDispense: reduc.motifSportDispense||'' };
 }
 
 // Classement d'une classe pour un trimestre donné (ou moyenne annuelle si trimestre==='ANNEE')
@@ -2476,25 +2494,39 @@ function renderSaisieNotes(){
 
 function renderDisciplinePanel(trimestre, classe){
   const eleves = ELEVES.filter(e=>e.classe===classe && e.statut!=='Inactif').slice().sort((a,b)=>a.nom.localeCompare(b.nom));
+  const datesOk = trimestre && PARAMS.trimestresDates[trimestre] && PARAMS.trimestresDates[trimestre].debut && PARAMS.trimestresDates[trimestre].fin;
   const rows = eleves.map(e=>{
     const reduc = (DISCIPLINE[e.id]||{})[trimestre] || {};
+    // Si aucune donnée n'a encore été saisie pour CE trimestre, le statut sportif général de la
+    // fiche élève sert simplement de suggestion de départ (case cochée par défaut) — une fois
+    // enregistrée, la valeur de ce trimestre devient indépendante et ne bougera plus si le statut
+    // général change ensuite.
+    const sportCoche = reduc.sportDispense!==undefined ? reduc.sportDispense===true : e.statutSport==='Dispensé';
+    const motifSport = reduc.motifSportDispense!==undefined ? reduc.motifSportDispense : (e.motifDispenseSport||'');
+    const assiduite = assiduiteDisciplinaireTrimestre(e.id, trimestre);
+    const reductionCalculee = calculerReductionAbsence(e.id, trimestre);
     return `<tr data-eleve-id="${e.id}">
       <td>${esc(e.nom)} ${esc(e.prenom)}</td>
       <td><input type="number" class="input-reduc-conduite" min="0" step="0.5" value="${reduc.conduite||''}" placeholder="0"></td>
-      <td><input type="number" class="input-reduc-absence" min="0" step="0.5" value="${reduc.absence||''}" placeholder="0"></td>
+      <td style="text-align:center;">${assiduite.joursAbsence}</td>
+      <td style="text-align:center;">${assiduite.heuresRetard}</td>
+      <td class="cell-reduc-absence-calc">${reductionCalculee.toFixed(2)}</td>
+      <td style="text-align:center;"><input type="checkbox" class="chk-sport-dispense" ${sportCoche?'checked':''}></td>
+      <td><input type="text" class="input-motif-sport" value="${esc(motifSport)}" placeholder="Motif (certif. médical...)" ${sportCoche?'':'disabled'}></td>
     </tr>`;
   }).join('');
   return `
   <div class="panel">
-    <div class="panel-head"><h3>Réductions de points — Conduite &amp; Absence — ${esc(classe)} — ${esc(trimestre)}</h3></div>
-    <p class="desc" style="margin:-6px 0 12px 0;">Ces points sont déduits directement du total des points de l'élève avant le calcul de sa moyenne trimestrielle (n'affectent pas les sous-moyennes par catégorie).</p>
+    <div class="panel-head"><h3>Réductions de points &amp; sport — ${esc(classe)} — ${esc(trimestre)}</h3></div>
+    <p class="desc" style="margin:-6px 0 12px 0;">La réduction « absence/retard » est calculée automatiquement à partir des absences <strong>non justifiées</strong> et des retards déjà enregistrés dans le module Absences (jours × ${PARAMS.tauxReductionAbsenceJour} pt + heures de retard × ${PARAMS.tauxReductionRetardHeure} pt — réglable dans Paramètres) : rien à ressaisir ici. Une absence justifiée (certificat médical...) n'est jamais pénalisée. Ces points sont déduits du total des points de l'élève avant le calcul de sa moyenne trimestrielle. La dispense de sport ne s'applique qu'à ce trimestre.</p>
+    ${!datesOk ? `<p class="desc" style="background:#fff3cd;border-radius:6px;padding:8px 10px;">⚠️ Les dates de début/fin de « ${esc(trimestre)} » ne sont pas encore configurées dans Paramètres → Dates des trimestres. Sans elles, les absences/retards ne peuvent pas être rattachés à ce trimestre et la réduction restera à 0.</p>` : ''}
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Élève</th><th>Réduction conduite (pts)</th><th>Réduction absence (pts)</th></tr></thead>
-        <tbody id="tbody-discipline">${rows || '<tr class="empty-row"><td colspan="3">Aucun élève dans cette classe.</td></tr>'}</tbody>
+        <thead><tr><th>Élève</th><th>Réduction conduite (pts)</th><th>Jours d'absence non justifiée</th><th>Heures de retard</th><th>Réd. absence/retard (calculée)</th><th>Dispensé de sport</th><th>Motif dispense</th></tr></thead>
+        <tbody id="tbody-discipline">${rows || '<tr class="empty-row"><td colspan="7">Aucun élève dans cette classe.</td></tr>'}</tbody>
       </table>
     </div>
-    ${eleves.length>0 ? '<button class="btn" id="btn-save-discipline" style="margin-top:12px;">Enregistrer les réductions</button>' : ''}
+    ${eleves.length>0 ? '<button class="btn" id="btn-save-discipline" style="margin-top:12px;">Enregistrer</button>' : ''}
   </div>
   `;
 }
@@ -3862,6 +3894,18 @@ function assiduiteEleveTrimestre(eleveId, trimestre){
   return { heuresRetard, joursAbsence };
 }
 
+// Variante utilisée uniquement pour le calcul des réductions de points (discipline) : une absence
+// JUSTIFIÉE (certificat médical, etc.) n'est pas une faute et ne doit donc pas être pénalisée —
+// contrairement à assiduiteEleveTrimestre ci-dessus, qui sert aux statistiques générales de
+// présence et compte toutes les absences, justifiées ou non. Les retards n'ont pas de statut
+// justifié/non justifié dans le module Absences : ils comptent donc tous, comme avant.
+function assiduiteDisciplinaireTrimestre(eleveId, trimestre){
+  const entrees = ABSENCES.filter(a=>a.eleveId===eleveId && trimestrePourDate(a.date)===trimestre);
+  const heuresRetard = entrees.filter(a=>a.type==='retard').reduce((s,a)=>s+(Number(a.heuresRetard)||0), 0);
+  const joursAbsence = entrees.filter(a=>a.type!=='retard' && !a.justifiee).length;
+  return { heuresRetard, joursAbsence };
+}
+
 // Cumul et moyenne par élève, pour une classe entière, sur un trimestre donné.
 // Sert à classer les classes de la plus assidue à la moins assidue.
 function assiduiteClasseTrimestre(classeNom, trimestre){
@@ -4509,6 +4553,16 @@ function renderParametres(){
   </div>
 
   <div class="panel">
+    <div class="panel-head"><h3>Discipline — quotas de réduction absence/retard</h3><p class="desc" style="width:100%;">La réduction est calculée automatiquement à partir des absences/retards déjà enregistrés dans le module Absences (aucune ressaisie) : réglez ici uniquement les taux appliqués.</p></div>
+    <form id="form-quotas-discipline" class="form-grid">
+      <div class="field"><label>Points retirés par jour d'absence</label><input name="tauxReductionAbsenceJour" type="number" min="0" step="0.05" value="${PARAMS.tauxReductionAbsenceJour}" required></div>
+      <div class="field"><label>Points retirés par heure de retard</label><input name="tauxReductionRetardHeure" type="number" min="0" step="0.05" value="${PARAMS.tauxReductionRetardHeure}" required></div>
+      <button class="btn gold" type="submit">Enregistrer</button>
+    </form>
+    <p class="muted" style="margin-top:8px;">Exemple avec les valeurs actuelles : 3 jours d'absence et 2 heures de retard donnent une réduction de ${(3*Number(PARAMS.tauxReductionAbsenceJour)+2*Number(PARAMS.tauxReductionRetardHeure)).toFixed(2)} points, déduits du total des points de l'élève avant le calcul de sa moyenne. Le total des points après réductions ne descend jamais sous 0.</p>
+  </div>
+
+  <div class="panel">
     <div class="panel-head"><h3>Carte scolaire — textes, cachet et QR code</h3><p class="desc" style="width:100%;">Tous les textes affichés sur la carte scolaire (recto et verso) sont modifiables ici. Vous pouvez aussi ajouter le cachet/la signature scannée du responsable, et remplacer le QR code généré automatiquement par le QR code officiel de l'établissement si vous en avez un.</p></div>
     <form id="form-carte-textes" class="form-grid">
       <div class="field"><label>Titre de la carte</label><input name="titre" value="${esc(PARAMS.carte.titre)}"></div>
@@ -5131,7 +5185,7 @@ function buildBulletinHTML(eleveId, trimestre){
     <div class="bulletin bulletin-pleine-page">
       ${printHeader()}
       <h3>Bulletin de notes — ${esc(trimestre)}</h3>
-      <p class="bulletin-eleve-line">Élève : <strong>${esc(el.nom)} ${esc(el.prenom)}</strong> &nbsp;·&nbsp; Classe : ${esc(el.classe)} &nbsp;·&nbsp; Aptitude sportive : ${el.statutSport==='Dispensé' ? `Dispensé${el.motifDispenseSport?' ('+esc(el.motifDispenseSport)+')':''}` : 'Apte'}</p>
+      <p class="bulletin-eleve-line">Élève : <strong>${esc(el.nom)} ${esc(el.prenom)}</strong> &nbsp;·&nbsp; Classe : ${esc(el.classe)} &nbsp;·&nbsp; Aptitude sportive : ${data.dispenseSport ? `Dispensé${data.motifSportDispense?' ('+esc(data.motifSportDispense)+')':''}` : 'Apte'}</p>
 
       <table class="receipt-table bulletin-table">
         <thead><tr><th>Matière</th><th>Coef.</th><th>Dev. 1</th><th>Dev. 2</th><th>Moy. dev.</th><th>Compo.</th><th>Moyenne</th><th>Points</th><th>Signature</th></tr></thead>
@@ -5237,28 +5291,36 @@ function buildFicheRecapGeneraleClassePrintHTML(classe, trimestre){
 }
 
 // Fiche des résultats trimestriels : total des points, moyenne trimestrielle et rang général
-// de chaque élève de la classe (toutes matières confondues) — pour vérification en classe.
+// de chaque élève de la classe (toutes matières confondues), plus le détail des réductions
+// (jours d'absence, heures de retard, conduite) et la dispense de sport du trimestre — pour
+// vérification en classe par le professeur principal avant impression des bulletins.
 function buildFicheResultatsTrimestrePrintHTML(classe, trimestre){
   const schoolName = esc(document.getElementById('school-name').value);
   const eleves = ELEVES.filter(e=>e.classe===classe).sort((a,b)=>a.nom.localeCompare(b.nom));
   const cl = classementClasse(classe, trimestre);
   const rows = eleves.map((e)=>{
     const t = computeTrimestre(e.id, trimestre);
+    const assiduite = assiduiteDisciplinaireTrimestre(e.id, trimestre);
     const rangEntry = cl.classement.find(r=>r.eleveId===e.id);
     return `<tr><td>${esc(e.nom)} ${esc(e.prenom)}</td>
+      <td>${assiduite.joursAbsence}</td>
+      <td>${assiduite.heuresRetard}</td>
+      <td>${t.reductionConduite>0?'-'+t.reductionConduite.toFixed(2):'—'}</td>
+      <td>${t.reductionAbsence>0?'-'+t.reductionAbsence.toFixed(2):'—'}</td>
+      <td>${t.dispenseSport?'Dispensé':'—'}</td>
       <td>${t.totalCoeff>0?t.totalPointsAjuste.toFixed(2):'—'}</td>
       <td>${t.totalCoeff>0?t.totalCoeff:'—'}</td>
       <td><strong>${t.moyenneGenerale!==null?t.moyenneGenerale.toFixed(2):'—'}</strong></td>
       <td>${rangEntry?rangEntry.rang+'e'+(rangEntry.exAequo?' ex æquo':''):'—'}</td></tr>`;
   }).join('');
   return `
-    <div class="bulletin" style="max-width:780px;">
+    <div class="bulletin" style="max-width:900px;">
       ${printHeader()}
       <h3>Fiche des résultats trimestriels — ${esc(classe)} — ${esc(trimestre)}</h3>
       <p class="bulletin-eleve-line">Moyenne de la classe : ${cl.moyenneClasse!==null?cl.moyenneClasse.toFixed(2):'—'}/20 &nbsp;·&nbsp; Effectif noté : ${cl.effectif} / ${eleves.length}</p>
-      <table class="receipt-table">
-        <thead><tr><th>Élève</th><th>Total des points</th><th>Total coeff.</th><th>Moyenne trimestrielle</th><th>Rang</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5">Aucun élève.</td></tr>'}</tbody>
+      <table class="receipt-table" style="font-size:9.5px;">
+        <thead><tr><th>Élève</th><th>Jours abs. (non just.)</th><th>H. retard</th><th>Réd. conduite</th><th>Réd. absence</th><th>Sport</th><th>Total des points</th><th>Total coeff.</th><th>Moyenne trimestrielle</th><th>Rang</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="10">Aucun élève.</td></tr>'}</tbody>
       </table>
     </div>
   `;
@@ -5560,6 +5622,11 @@ function attachHandlers(){
     document.querySelectorAll('[data-matieretab]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ matiereSaisieTab = btn.dataset.matieretab; render(); });
     });
+    document.querySelectorAll('#tbody-discipline tr').forEach(tr=>{
+      tr.querySelector('.chk-sport-dispense')?.addEventListener('change', (e)=>{
+        tr.querySelector('.input-motif-sport').disabled = !e.target.checked;
+      });
+    });
     document.getElementById('btn-save-discipline')?.addEventListener('click', async ()=>{
       const trimestre = PARAMS.trimestres[trimestreTab];
       const SEUIL_INHABITUEL = 10;
@@ -5568,21 +5635,26 @@ function attachHandlers(){
       document.querySelectorAll('#tbody-discipline tr').forEach(tr=>{
         const eleveId = tr.dataset.eleveId;
         const conduite = Number(tr.querySelector('.input-reduc-conduite').value)||0;
-        const absence = Number(tr.querySelector('.input-reduc-absence').value)||0;
-        if(conduite>SEUIL_INHABITUEL || absence>SEUIL_INHABITUEL){
+        const sportDispense = tr.querySelector('.chk-sport-dispense').checked;
+        const motifSportDispense = tr.querySelector('.input-motif-sport').value.trim();
+        const reductionAbsence = calculerReductionAbsence(eleveId, trimestre);
+        if(conduite>SEUIL_INHABITUEL || reductionAbsence>SEUIL_INHABITUEL){
           const el = ELEVES.find(e=>e.id===eleveId);
-          alertes.push(`${el?el.nom+' '+el.prenom:eleveId} (conduite: ${conduite}, absence: ${absence})`);
+          alertes.push(`${el?el.nom+' '+el.prenom:eleveId} (conduite: ${conduite}, absence/retard: ${reductionAbsence.toFixed(2)})`);
         }
-        lignes.push({ eleveId, conduite, absence });
+        lignes.push({ eleveId, conduite, sportDispense, motifSportDispense });
       });
-      // Avertissement (non bloquant) : une réduction inhabituellement élevée est souvent une
-      // faute de frappe (ex. "50" au lieu de "5") qui peut faire chuter une moyenne trimestrielle
-      // de façon spectaculaire — mais une réduction importante peut aussi être légitime.
+      // Avertissement (non bloquant) : une réduction inhabituellement élevée peut signaler une
+      // erreur de saisie dans le module Absences (ex. "50 heures" au lieu de "5") — mais peut
+      // aussi être légitime pour un élève réellement très absent.
       if(alertes.length>0 && !confirm(`Réduction(s) inhabituellement élevée(s) (plus de ${SEUIL_INHABITUEL} points) :\n\n${alertes.join('\n')}\n\nEnregistrer quand même ?`)) return;
-      lignes.forEach(({eleveId, conduite, absence})=>{
+      lignes.forEach(({eleveId, conduite, sportDispense, motifSportDispense})=>{
         if(!DISCIPLINE[eleveId]) DISCIPLINE[eleveId] = {};
-        if(conduite>0 || absence>0) DISCIPLINE[eleveId][trimestre] = { conduite, absence };
-        else delete DISCIPLINE[eleveId][trimestre];
+        if(conduite>0 || sportDispense){
+          DISCIPLINE[eleveId][trimestre] = { conduite, sportDispense, motifSportDispense };
+        } else {
+          delete DISCIPLINE[eleveId][trimestre];
+        }
       });
       await saveDiscipline();
       showToast('Réductions enregistrées');
@@ -6415,7 +6487,7 @@ function attachHandlers(){
     // Réinitialisations localisées (année en cours)
     const resetsLocalises = {
       'reset-eleves': { label: 'tous les élèves', fn: async ()=>{ const ids = ELEVES.map(e=>e.id); ELEVES = []; await Promise.all(ids.map(id=>imageDBSet('photo-'+id, null))); await saveEleves(); } },
-      'reset-notes': { label: 'toutes les notes et les réductions de conduite/absence', fn: async ()=>{ NOTES = []; DISCIPLINE = {}; await saveNotes(); await saveDiscipline(); } },
+      'reset-notes': { label: 'toutes les notes et les réductions de conduite/sport', fn: async ()=>{ NOTES = []; DISCIPLINE = {}; await saveNotes(); await saveDiscipline(); } },
       'reset-examens-blancs': { label: 'tous les examens blancs', fn: async ()=>{ EXAMENS_BLANCS = []; NOTES_BLANC = []; DECISIONS_BLANC = {}; await saveExamensBlancs(); await saveNotesBlanc(); await saveDecisionsBlanc(); } },
       'reset-decisions': { label: 'toutes les décisions de fin d\'année', fn: async ()=>{ DECISIONS = {}; await saveDecisions(); } },
       'reset-finances': { label: 'toutes les finances (paiements et dépenses)', fn: async ()=>{ FINANCES = { paiements: [], depenses: [] }; await saveFinances(); } },
@@ -6529,6 +6601,14 @@ function attachHandlers(){
       PARAMS.directeurNom = f.get('directeurNom')||'';
       PARAMS.directeurTelephone = f.get('directeurTelephone')||'';
       await saveParams(); showToast('Paramètres enregistrés'); render();
+    });
+
+    document.getElementById('form-quotas-discipline')?.addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      const f = new FormData(e.target);
+      PARAMS.tauxReductionAbsenceJour = Number(f.get('tauxReductionAbsenceJour'))||0;
+      PARAMS.tauxReductionRetardHeure = Number(f.get('tauxReductionRetardHeure'))||0;
+      await saveParams(); showToast('Quotas enregistrés'); render();
     });
 
     document.getElementById('form-carte-textes')?.addEventListener('submit', async (e)=>{
