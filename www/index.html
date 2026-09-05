@@ -5065,8 +5065,10 @@ function buildBulletinHTML(eleveId, trimestre){
   `).join('');
 
   const totauxRow = `
-    <tr class="bulletin-totaux-row"><td colspan="6" style="text-align:right;"><strong>Totaux</strong></td>
+    <tr class="bulletin-totaux-row"><td style="text-align:right;"><strong>Totaux</strong></td>
     <td><strong>${data.totalCoeff}</strong></td>
+    <td colspan="4"></td>
+    <td></td>
     <td><strong>${data.totalPoints.toFixed(2)}</strong></td>
     <td></td></tr>
   `;
@@ -5087,7 +5089,6 @@ function buildBulletinHTML(eleveId, trimestre){
   const disciplineBlock = `
     <div class="bulletin-subhead">Discipline et total des points</div>
     <div class="stat-row">
-      ${statChip('Total des points', data.totalPoints.toFixed(2))}
       ${statChip('Réduction conduite', '-'+data.reductionConduite.toFixed(2)+' pt'+(data.reductionConduite>1?'s':''))}
       ${statChip('Réduction absence/retard', '-'+data.reductionAbsence.toFixed(2)+' pt'+(data.reductionAbsence>1?'s':''))}
       ${statChip('Total des points après réductions', data.totalPointsAjuste.toFixed(2), true)}
