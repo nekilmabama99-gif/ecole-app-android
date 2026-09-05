@@ -271,6 +271,7 @@
   .bulletin-eleve-line{font-size:11.5px;margin:0 0 8px 0;text-align:center;}
   .bulletin-table td, .bulletin-table th{padding:3.5px 6px;font-size:10px;}
   .bulletin-subhead{font-family:var(--serif);font-size:10.5px;font-weight:700;color:var(--navy);margin:9px 0 4px 0;border-bottom:1px solid var(--line);padding-bottom:2px;}
+  .bulletin-totaux-row td{border-top:1.5px solid var(--navy);}
   .stat-row{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:4px;}
   .stat-chip{border:1px solid #d7d3c8;border-radius:5px;padding:3px 7px;background:#fafaf7;line-height:1.25;}
   .stat-chip span{display:block;font-size:8.5px;color:#777;text-transform:uppercase;letter-spacing:.02em;}
@@ -1557,11 +1558,14 @@ function computeTrimestre(eleveId, trimestre){
   const eleve = ELEVES.find(e=>e.id===eleveId);
   const classe = eleve ? eleve.classe : null;
   const notes = NOTES.filter(n=>n.eleveId===eleveId && n.trimestre===trimestre);
+  // Un élève dispensé de sport ne doit avoir ni la matière Sport sur son bulletin,
+  // ni son éventuelle note prise en compte dans le calcul de sa moyenne.
+  const dispenseSport = eleve && eleve.statutSport==='Dispensé';
   const lignes = notes.map(n=>{
     const info = getMatiereInfo(n, classe);
     const calc = moyenneMatiere(n);
     return { matiere: info.nom, coefficient: info.coefficient, categorie: info.categorie, enseignant: info.enseignant, ...calc };
-  }).filter(l => l.moyenne!==null);
+  }).filter(l => l.moyenne!==null && !(dispenseSport && l.categorie==='Sport'));
 
   let totalPoints=0, totalCoeff=0;
   const parCategorie = {};
@@ -5056,8 +5060,16 @@ function buildBulletinHTML(eleveId, trimestre){
     <td>${l.moyDevoirs!==null?l.moyDevoirs.toFixed(2):'—'}</td>
     <td>${l.comp!==null?l.comp.toFixed(2):'—'}</td>
     <td><strong>${l.moyenne.toFixed(2)}</strong></td>
+    <td>${(l.moyenne*l.coefficient).toFixed(2)}</td>
     <td>${l.enseignant?`<div class="mini-sig-nom">${esc(l.enseignant)}</div>`:''}<div class="mini-sig-line"></div></td></tr>
   `).join('');
+
+  const totauxRow = `
+    <tr class="bulletin-totaux-row"><td colspan="6" style="text-align:right;"><strong>Totaux</strong></td>
+    <td><strong>${data.totalCoeff}</strong></td>
+    <td><strong>${data.totalPoints.toFixed(2)}</strong></td>
+    <td></td></tr>
+  `;
 
   const sousMoyChips = Object.entries(data.sousMoyennes).map(([cat,val])=>
     statChip(cat, val!==null?val.toFixed(2)+'/20':'—')
@@ -5065,22 +5077,22 @@ function buildBulletinHTML(eleveId, trimestre){
 
   const rangChips = [
     statChip('Moyenne du trimestre', data.moyenneGenerale!==null?data.moyenneGenerale.toFixed(2)+'/20':'—', true),
-    statChip('Rang', classement.rang?classement.rang+(classement.exAequo?' ex æquo':'')+' / '+classement.effectif:'—'),
+    statChip('Effectif de la classe', classement.effectif),
+    statChip('Rang', classement.rang?classement.rang+(classement.exAequo?' ex æquo':''):'—'),
     statChip('Moyenne de la classe', classement.moyenneClasse!==null?classement.moyenneClasse.toFixed(2)+'/20':'—'),
     statChip('Plus forte moyenne', classement.forte!==null?classement.forte.toFixed(2)+'/20':'—'),
-    statChip('Plus faible moyenne', classement.faible!==null?classement.faible.toFixed(2)+'/20':'—'),
-    statChip('Sport', el.statutSport==='Dispensé' ? `Dispensé${el.motifDispenseSport?' ('+esc(el.motifDispenseSport)+')':''}` : 'Apte')
+    statChip('Plus faible moyenne', classement.faible!==null?classement.faible.toFixed(2)+'/20':'—')
   ].join('');
 
-  const aDesReductions = data.reductionConduite>0 || data.reductionAbsence>0;
-  const disciplineBlock = aDesReductions ? `
-    <div class="bulletin-subhead">Discipline</div>
+  const disciplineBlock = `
+    <div class="bulletin-subhead">Discipline et total des points</div>
     <div class="stat-row">
+      ${statChip('Total des points', data.totalPoints.toFixed(2))}
       ${statChip('Réduction conduite', '-'+data.reductionConduite.toFixed(2)+' pt'+(data.reductionConduite>1?'s':''))}
-      ${statChip('Réduction absence', '-'+data.reductionAbsence.toFixed(2)+' pt'+(data.reductionAbsence>1?'s':''))}
-      ${statChip('Total des points', data.totalPoints.toFixed(2)+' → '+data.totalPointsAjuste.toFixed(2))}
+      ${statChip('Réduction absence/retard', '-'+data.reductionAbsence.toFixed(2)+' pt'+(data.reductionAbsence>1?'s':''))}
+      ${statChip('Total des points après réductions', data.totalPointsAjuste.toFixed(2), true)}
     </div>
-  ` : '';
+  `;
 
   // Historique des trimestres précédents (T2 affiche T1 ; T3 affiche T1 et T2), en ligne compacte
   let historique = '';
@@ -5104,7 +5116,8 @@ function buildBulletinHTML(eleveId, trimestre){
       <div class="bulletin-subhead">Bilan annuel</div>
       <div class="stat-row">
         ${statChip('Moyenne annuelle', moyAn!==null?moyAn.toFixed(2)+'/20':'—', true)}
-        ${statChip('Rang annuel', classAn.rang?classAn.rang+(classAn.exAequo?' ex æquo':'')+' / '+classAn.effectif:'—')}
+        ${statChip('Effectif de la classe', classAn.effectif)}
+        ${statChip('Rang annuel', classAn.rang?classAn.rang+(classAn.exAequo?' ex æquo':''):'—')}
         ${statChip('Moy. classe annuelle', classAn.moyenneClasse!==null?classAn.moyenneClasse.toFixed(2)+'/20':'—')}
         ${statChip('Forte moy. annuelle', classAn.forte!==null?classAn.forte.toFixed(2)+'/20':'—')}
         ${statChip('Faible moy. annuelle', classAn.faible!==null?classAn.faible.toFixed(2)+'/20':'—')}
@@ -5117,11 +5130,11 @@ function buildBulletinHTML(eleveId, trimestre){
     <div class="bulletin bulletin-pleine-page">
       ${printHeader()}
       <h3>Bulletin de notes — ${esc(trimestre)}</h3>
-      <p class="bulletin-eleve-line">Élève : <strong>${esc(el.nom)} ${esc(el.prenom)}</strong> &nbsp;·&nbsp; Classe : ${esc(el.classe)}</p>
+      <p class="bulletin-eleve-line">Élève : <strong>${esc(el.nom)} ${esc(el.prenom)}</strong> &nbsp;·&nbsp; Classe : ${esc(el.classe)} &nbsp;·&nbsp; Aptitude sportive : ${el.statutSport==='Dispensé' ? `Dispensé${el.motifDispenseSport?' ('+esc(el.motifDispenseSport)+')':''}` : 'Apte'}</p>
 
       <table class="receipt-table bulletin-table">
-        <thead><tr><th>Matière</th><th>Coef.</th><th>Dev. 1</th><th>Dev. 2</th><th>Moy. dev.</th><th>Compo.</th><th>Moyenne</th><th>Signature</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="8">Aucune note pour ce trimestre.</td></tr>'}</tbody>
+        <thead><tr><th>Matière</th><th>Coef.</th><th>Dev. 1</th><th>Dev. 2</th><th>Moy. dev.</th><th>Compo.</th><th>Moyenne</th><th>Points</th><th>Signature</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="9">Aucune note pour ce trimestre.</td></tr>'}${rows ? totauxRow : ''}</tbody>
       </table>
 
       <div class="bulletin-subhead">Sous-moyennes par catégorie</div>
