@@ -15,29 +15,68 @@ carte SD...), comme n'importe quel fichier.
 
 1. Créer un dépôt GitHub (gratuit) et y pousser ce dossier
    (`capacitor-app/`).
-2. Le fichier `.github/workflows/build-android.yml` inclus se déclenche
+2. **Configurer la signature une seule fois** (voir section "Signature de
+   l'application" plus bas) — sans ça, la compilation échouera volontairement
+   plutôt que de produire un APK non signé.
+3. Le fichier `.github/workflows/build-android.yml` inclus se déclenche
    automatiquement à chaque `git push` et compile l'APK sur les machines de
    GitHub — tu n'as besoin ni d'Android Studio ni du SDK Android sur ton
    propre ordinateur.
-3. Une fois le build terminé (onglet "Actions" du dépôt), télécharger
+4. Une fois le build terminé (onglet "Actions" du dépôt), télécharger
    l'APK depuis les "Artifacts".
+
+## Signature de l'application (IMPORTANT — à faire une seule fois)
+
+Comme pour Windows/Mac, un APK doit être signé pour être installable
+proprement. Une clé de signature Android t'a été fournie séparément
+(`gestion-etablissement-release.keystore`) — **garde ce fichier et son mot
+de passe en lieu sûr** (ex. gestionnaire de mots de passe, clé USB à part) :
+si tu le perds, tu ne pourras plus jamais publier de mise à jour signée de
+la même façon, et tes utilisateurs devront désinstaller l'ancienne version
+avant d'installer la nouvelle.
+
+Dans le dépôt GitHub → **Settings → Secrets and variables → Actions → New
+repository secret**, crée ces 4 secrets :
+
+| Nom du secret | Valeur |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64` | Le contenu du fichier `.keystore` encodé en base64 (fourni à part) |
+| `ANDROID_KEYSTORE_PASSWORD` | Le mot de passe du keystore (fourni à part) |
+| `ANDROID_KEY_ALIAS` | `gestionetablissement` |
+| `ANDROID_KEY_PASSWORD` | Le mot de passe de la clé (fourni à part) |
+
+Une fois ces 4 secrets enregistrés, chaque `git push` compile automatiquement
+un APK signé avec ta propre clé (et non plus la clé de test générique
+d'Android) — plus professionnel, et moins susceptible d'être signalé par
+Android/Play Protect à l'installation.
 
 ## Option B — Compiler toi-même, en local
 
 Nécessite [Node.js](https://nodejs.org), un JDK 17, et le SDK Android
 (le plus simple : installer [Android Studio](https://developer.android.com/studio),
-qui installe tout automatiquement).
+qui installe tout automatiquement). Place aussi le fichier
+`gestion-etablissement-release.keystore` à la racine du dossier `android/`
+(créé par `npx cap add android`) et un fichier `android/keystore.properties`
+avec ce contenu :
+
+```
+storeFile=gestion-etablissement-release.keystore
+storePassword=<le mot de passe du keystore>
+keyAlias=gestionetablissement
+keyPassword=<le mot de passe de la clé>
+```
 
 ```
 npm install
 npx cap add android
 npx cap sync android
+node scripts/configurer-signature-android.js
 cd android
-./gradlew assembleDebug
+./gradlew assembleRelease
 ```
 
-L'APK se trouve ensuite dans
-`android/app/build/outputs/apk/debug/app-debug.apk`.
+L'APK signé se trouve ensuite dans
+`android/app/build/outputs/apk/release/app-release.apk`.
 
 ## Installer l'APK sur un téléphone/tablette (aucune connexion nécessaire)
 
@@ -68,3 +107,10 @@ par-dessus l'ancien sans perdre ses données, tant que le nom de package
 Cette version embarque le système de licence par clé publique/privée déjà
 en place dans `index.html`. Utilise `generateur-licences.html` (fourni à
 part, à garder chez toi) pour produire les clés de licence.
+
+**Important pour Android** : le verrouillage d'une licence à un poste précis
+(ajouté récemment côté Windows/Mac/Linux) repose sur un identifiant que seule
+la version Electron sait lire. Dans l'app Android, cet identifiant n'existe
+pas — laisse donc toujours le champ "Identifiant machine" **vide** dans
+`generateur-licences.html` pour toute licence destinée à un téléphone ou une
+tablette, sinon l'activation échouera systématiquement.
